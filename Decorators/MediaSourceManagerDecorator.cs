@@ -367,7 +367,13 @@ public sealed class MediaSourceManagerDecorator(
 
         var manager = _manager.Value;
         var ctx = _http.HttpContext;
-        var cfg = GelatoPlugin.Instance!.GetConfig(user.Id);
+        var userId = user?.Id ?? Guid.Empty;
+        if (userId == Guid.Empty)
+        {
+            ctx.TryGetUserId(out userId);
+        }
+
+        var cfg = GelatoPlugin.Instance!.GetConfig(userId);
 
         var sources = GetStaticMediaSources(item, enablePathSubstitution, user);
 
@@ -393,6 +399,7 @@ public sealed class MediaSourceManagerDecorator(
             && ctx.GetActionName() == "GetPostedPlaybackInfo"
             && deviceProfile is not null
             && sources.Count > 1
+            && user is not null
             && !user.HasPermission(PermissionKind.ForceRemoteSourceTranscoding);
 
         Guid? mediaSourceId = explicitMediaSourceId;
@@ -400,7 +407,9 @@ public sealed class MediaSourceManagerDecorator(
 
         if (autoSelect)
         {
-            selected = SelectFirstDirectPlayCompatible(sources, item, deviceProfile!, ctx) ?? sources.FirstOrDefault();
+            selected =
+                SelectFirstDirectPlayCompatible(sources, item, deviceProfile!, ctx)
+                ?? sources.FirstOrDefault();
         }
         else
         {
@@ -518,8 +527,10 @@ public sealed class MediaSourceManagerDecorator(
                 };
 
                 if (
-                    httpContext?.Items.TryGetValue(PlaybackInfoFilter.MaxStreamingBitrateKey, out var maxBitrateObj)
-                        == true
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.MaxStreamingBitrateKey,
+                        out var maxBitrateObj
+                    ) == true
                     && maxBitrateObj is int maxBitrate
                 )
                 {
@@ -527,8 +538,10 @@ public sealed class MediaSourceManagerDecorator(
                 }
 
                 if (
-                    httpContext?.Items.TryGetValue(PlaybackInfoFilter.MaxAudioChannelsKey, out var maxAudioObj)
-                        == true
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.MaxAudioChannelsKey,
+                        out var maxAudioObj
+                    ) == true
                     && maxAudioObj is int maxAudioChannels
                 )
                 {
@@ -536,8 +549,10 @@ public sealed class MediaSourceManagerDecorator(
                 }
 
                 if (
-                    httpContext?.Items.TryGetValue(PlaybackInfoFilter.AllowVideoStreamCopyKey, out var allowVideoObj)
-                        == true
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.AllowVideoStreamCopyKey,
+                        out var allowVideoObj
+                    ) == true
                     && allowVideoObj is bool allowVideoStreamCopy
                 )
                 {
@@ -545,8 +560,10 @@ public sealed class MediaSourceManagerDecorator(
                 }
 
                 if (
-                    httpContext?.Items.TryGetValue(PlaybackInfoFilter.AllowAudioStreamCopyKey, out var allowAudioObj)
-                        == true
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.AllowAudioStreamCopyKey,
+                        out var allowAudioObj
+                    ) == true
                     && allowAudioObj is bool allowAudioStreamCopy
                 )
                 {
@@ -556,7 +573,10 @@ public sealed class MediaSourceManagerDecorator(
                 var streamInfo = streamBuilder.GetOptimalVideoStream(options);
                 if (streamInfo?.PlayMethod == PlayMethod.DirectPlay)
                 {
-                    _log.LogInformation("Auto source: selected {Source}", DescribeSource(candidate));
+                    _log.LogInformation(
+                        "Auto source: selected {Source}",
+                        DescribeSource(candidate)
+                    );
                     return candidate;
                 }
 
@@ -567,7 +587,9 @@ public sealed class MediaSourceManagerDecorator(
                 );
             }
 
-            _log.LogInformation("Auto source: no DirectPlay candidate; using first AIOStreams result");
+            _log.LogInformation(
+                "Auto source: no DirectPlay candidate; using first AIOStreams result"
+            );
             return null;
         }
 
@@ -577,18 +599,22 @@ public sealed class MediaSourceManagerDecorator(
             if (video is null)
                 return source.Name ?? source.Id ?? "unknown";
 
-            var resolution = video.Width.HasValue && video.Height.HasValue
-                ? $"{video.Width}x{video.Height}"
-                : video.Height.HasValue
-                    ? $"{video.Height}p"
-                    : "unknown resolution";
+            var resolution =
+                video.Width.HasValue && video.Height.HasValue
+                    ? $"{video.Width}x{video.Height}"
+                    : video.Height.HasValue
+                        ? $"{video.Height}p"
+                        : "unknown resolution";
             var codec = string.IsNullOrWhiteSpace(video.Codec)
                 ? "unknown codec"
                 : video.Codec.ToUpperInvariant();
             return $"{resolution} {codec}";
         }
 
-        static MediaSourceInfo? SelectByIdOrFirst(IReadOnlyList<MediaSourceInfo> list, Guid? id)
+        static MediaSourceInfo? SelectByIdOrFirst(
+            IReadOnlyList<MediaSourceInfo> list,
+            Guid? id
+        )
         {
             if (!id.HasValue)
                 return list.FirstOrDefault();
@@ -724,7 +750,6 @@ public sealed class MediaSourceManagerDecorator(
             HasSegments = true,
             //HasSegments = MediaSegmentManager.HasSegments(item.Id)
         };
-
 
         if (user is not null)
         {
