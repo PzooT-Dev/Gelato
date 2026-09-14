@@ -185,6 +185,18 @@
               <div class="fieldDescription">Cache duration for external stream URLs.</div>
             </div>
 
+            <div class="checkboxContainer checkboxContainer-withDescription">
+              <label>
+                <input is="emby-checkbox" type="checkbox" id="chkPreferCompatibleSource" />
+                <span>Prefer client-compatible stream</span>
+              </label>
+              <div class="fieldDescription">
+                For normal playback, choose the first AIOStreams result Jellyfin says the requesting client can Direct Play.
+                Manual Version selection is unchanged. If no compatible result is available, Gelato keeps the normal first result
+                and Jellyfin may transcode it as before.
+              </div>
+            </div>
+
           </div>
 
           <!-- User Configs Tab -->
@@ -300,6 +312,7 @@
         const txtFFmpegProbeSize = page.querySelector('#txtFFmpegProbeSize');
         const chkEnableJavaScriptInjection = page.querySelector('#chkEnableJavaScriptInjection');
         const chkLazyImages = page.querySelector('#chkLazyImages');
+        const chkPreferCompatibleSource = page.querySelector('#chkPreferCompatibleSource');
 
         // Catalogs
         const catalogsList = page.querySelector('#catalogsList');
@@ -594,6 +607,7 @@
             if (txtFFmpegProbeSize) txtFFmpegProbeSize.value = cfg.FFmpegProbeSize || "25M";
             if (chkEnableJavaScriptInjection) chkEnableJavaScriptInjection.checked = cfg.EnableJavaScriptInjection || false;
             if (chkLazyImages) chkLazyImages.checked = cfg.LazyImages ?? false;
+            if (chkPreferCompatibleSource) chkPreferCompatibleSource.checked = cfg.PreferCompatibleSource ?? false;
 
             // User Overrides Logic
             await loadUsers();
@@ -629,6 +643,7 @@
             cfg.FFmpegProbeSize = txtFFmpegProbeSize.value;
             cfg.EnableJavaScriptInjection = chkEnableJavaScriptInjection.checked;
             cfg.LazyImages = chkLazyImages.checked;
+            cfg.PreferCompatibleSource = chkPreferCompatibleSource.checked;
 
             // Only collect catalog states if catalogs have been loaded (i.e., if we're on catalogs tab or it was loaded)
             if (allCatalogs.length > 0) {

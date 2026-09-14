@@ -1,4 +1,5 @@
 using System.Reflection;
+using MediaBrowser.Model.Dlna;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -6,7 +7,7 @@ using Microsoft.AspNetCore.Mvc.Filters;
 namespace Gelato.Filters;
 
 /// <summary>
-/// Captures media source id for playback request and save it for later reuse.
+/// Captures playback request data for later reuse by the media source decorator.
 /// Looks for both "MediaSourceId" and "RouteMediaSourceId", stores as "MediaSourceId".
 /// </summary>
 public sealed class PlaybackInfoFilter : IAsyncActionFilter, IOrderedFilter
@@ -14,6 +15,11 @@ public sealed class PlaybackInfoFilter : IAsyncActionFilter, IOrderedFilter
     public int Order { get; init; } = 3;
 
     private const string ItemsKey = "MediaSourceId";
+    public const string DeviceProfileKey = "GelatoDeviceProfile";
+    public const string MaxStreamingBitrateKey = "GelatoMaxStreamingBitrate";
+    public const string MaxAudioChannelsKey = "GelatoMaxAudioChannels";
+    public const string AllowVideoStreamCopyKey = "GelatoAllowVideoStreamCopy";
+    public const string AllowAudioStreamCopyKey = "GelatoAllowAudioStreamCopy";
     private static readonly string[] InputKeys = ["MediaSourceId", "RouteMediaSourceId"];
 
     public async Task OnActionExecutionAsync(
@@ -23,6 +29,8 @@ public sealed class PlaybackInfoFilter : IAsyncActionFilter, IOrderedFilter
     {
         if (ctx.ActionDescriptor is ControllerActionDescriptor cad)
             ctx.HttpContext.Items["actionName"] = cad.ActionName;
+
+        CapturePlaybackOptions(ctx.ActionArguments, ctx.HttpContext);
 
         if (ctx.HttpContext.Items.ContainsKey(ItemsKey))
         {
@@ -41,6 +49,50 @@ public sealed class PlaybackInfoFilter : IAsyncActionFilter, IOrderedFilter
         }
 
         await next();
+    }
+
+    private static void CapturePlaybackOptions(
+        IDictionary<string, object?> args,
+        HttpContext http
+    )
+    {
+        foreach (var value in args.Values)
+        {
+            if (value is null)
+                continue;
+
+            var type = value.GetType();
+            var deviceProfile = type.GetProperty(
+                "DeviceProfile",
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase
+            )?.GetValue(value);
+
+            if (deviceProfile is DeviceProfile profile)
+                http.Items[DeviceProfileKey] = profile;
+
+            CaptureValue<int>(value, type, "MaxStreamingBitrate", MaxStreamingBitrateKey, http);
+            CaptureValue<int>(value, type, "MaxAudioChannels", MaxAudioChannelsKey, http);
+            CaptureValue<bool>(value, type, "AllowVideoStreamCopy", AllowVideoStreamCopyKey, http);
+            CaptureValue<bool>(value, type, "AllowAudioStreamCopy", AllowAudioStreamCopyKey, http);
+        }
+    }
+
+    private static void CaptureValue<T>(
+        object value,
+        Type type,
+        string propertyName,
+        string itemKey,
+        HttpContext http
+    )
+        where T : struct
+    {
+        var raw = type.GetProperty(
+            propertyName,
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase
+        )?.GetValue(value);
+
+        if (raw is T typed)
+            http.Items[itemKey] = typed;
     }
 
     private static bool TryFromArgs(IDictionary<string, object?> args, out string? id)
