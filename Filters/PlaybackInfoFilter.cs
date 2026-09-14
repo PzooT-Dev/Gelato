@@ -3,6 +3,8 @@ using MediaBrowser.Model.Dlna;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Gelato.Filters;
 
@@ -32,20 +34,38 @@ public sealed class PlaybackInfoFilter : IAsyncActionFilter, IOrderedFilter
 
         CapturePlaybackOptions(ctx.ActionArguments, ctx.HttpContext);
 
-        if (ctx.HttpContext.Items.ContainsKey(ItemsKey))
+        if (!ctx.HttpContext.Items.ContainsKey(ItemsKey))
         {
-            await next();
-            return;
+            if (
+                TryFromArgs(ctx.ActionArguments, out var id)
+                || TryFromRoute(ctx, out id)
+                || TryFromQuery(ctx.HttpContext.Request, out id)
+            )
+            {
+                if (!string.IsNullOrWhiteSpace(id))
+                    ctx.HttpContext.Items[ItemsKey] = id;
+            }
         }
 
-        if (
-            TryFromArgs(ctx.ActionArguments, out var id)
-            || TryFromRoute(ctx, out id)
-            || TryFromQuery(ctx.HttpContext.Request, out id)
-        )
+        var logger = ctx.HttpContext.RequestServices.GetService<ILogger<PlaybackInfoFilter>>();
+        if (logger is not null)
         {
-            if (!string.IsNullOrWhiteSpace(id))
-                ctx.HttpContext.Items[ItemsKey] = id;
+            var actionName =
+                ctx.HttpContext.Items.TryGetValue("actionName", out var actionObj)
+                    ? actionObj as string
+                    : null;
+            var mediaSourceId =
+                ctx.HttpContext.Items.TryGetValue(ItemsKey, out var mediaSourceObj)
+                    ? mediaSourceObj as string
+                    : null;
+            var hasDeviceProfile = ctx.HttpContext.Items.ContainsKey(DeviceProfileKey);
+
+            logger.LogInformation(
+                "Playback capture: action={Action} mediaSourceId={MediaSourceId} profile={Profile}",
+                actionName,
+                mediaSourceId,
+                hasDeviceProfile
+            );
         }
 
         await next();
