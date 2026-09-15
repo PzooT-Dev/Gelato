@@ -28,6 +28,7 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool DisableSearch { get; set; } = false;
     public bool EnableJavaScriptInjection { get; set; } = false;
     public bool LazyImages { get; set; } = false;
+    public bool PreferCompatibleSource { get; set; } = false;
     public List<CatalogConfig> Catalogs { get; set; } = [];
     public List<UserConfig> UserConfigs { get; set; } = [];
 
@@ -149,6 +150,7 @@ public class UserConfig
             FFmpegProbeSize = baseConfig.FFmpegProbeSize,
             CreateCollections = baseConfig.CreateCollections,
             MaxCollectionItems = baseConfig.MaxCollectionItems,
+            PreferCompatibleSource = baseConfig.PreferCompatibleSource,
             UserConfigs = baseConfig.UserConfigs,
         };
     }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using Gelato.Filters;
 using Gelato.Providers;
 using Gelato.Services;
 using Jellyfin.Data;
@@ -17,6 +18,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
@@ -27,6 +29,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Providers;
+using MediaBrowser.Model.Session;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
@@ -44,7 +47,8 @@ public sealed class MediaSourceManagerDecorator(
     Lazy<GelatoManager> manager,
     Lazy<SubtitleProvider> subtitleProvider,
     IMediaSegmentManager mediaSegmentManager,
-    Lazy<IProviderManager> providerManager
+    Lazy<IProviderManager> providerManager,
+    IMediaEncoder mediaEncoder
 ) : IMediaSourceManager
 {
     private readonly IMediaSourceManager _inner =
@@ -62,6 +66,8 @@ public sealed class MediaSourceManagerDecorator(
         config ?? throw new ArgumentNullException(nameof(config));
     private readonly Lazy<GelatoManager> _manager = manager;
     private readonly Lazy<SubtitleProvider> _subtitleProvider = subtitleProvider;
+    private readonly IMediaEncoder _mediaEncoder =
+        mediaEncoder ?? throw new ArgumentNullException(nameof(mediaEncoder));
 
     //  private readonly Lazy<ISubtitleManager> _subtitleManager = subtitleManager ?? throw new ArgumentNullException(nameof(subtitleManager));
     // Lazy: ProviderManager depends on ISubtitleManager, which depends on
@@ -361,31 +367,75 @@ public sealed class MediaSourceManagerDecorator(
 
         var manager = _manager.Value;
         var ctx = _http.HttpContext;
+        var userId = user?.Id ?? Guid.Empty;
+        if (userId == Guid.Empty)
+        {
+            ctx.TryGetUserId(out userId);
+        }
+
+        var cfg = GelatoPlugin.Instance!.GetConfig(userId);
 
         var sources = GetStaticMediaSources(item, enablePathSubstitution, user);
 
-        Guid? mediaSourceId =
+        Guid? explicitMediaSourceId =
             ctx?.Items.TryGetValue("MediaSourceId", out var idObj) == true
             && idObj is string idStr
             && Guid.TryParse(idStr, out var fromCtx)
                 ? fromCtx
-                : (
-                    item.IsPrimaryVersion()
-                    && sources.Count > 0
-                    && Guid.TryParse(sources[0].Id, out var fromSource)
-                        ? fromSource
-                        : null
-                );
+                : null;
+
+        DeviceProfile? deviceProfile = null;
+        if (
+            ctx?.Items.TryGetValue(PlaybackInfoFilter.DeviceProfileKey, out var profileObj) == true
+            && profileObj is DeviceProfile capturedProfile
+        )
+        {
+            deviceProfile = capturedProfile;
+        }
+
+        var autoSelect =
+            cfg.PreferCompatibleSource
+            && explicitMediaSourceId is null
+            && ctx.GetActionName() == "GetPostedPlaybackInfo"
+            && deviceProfile is not null
+            && sources.Count > 1
+            && user is not null
+            && !user.HasPermission(PermissionKind.ForceRemoteSourceTranscoding);
+
+        Guid? mediaSourceId = explicitMediaSourceId;
+        MediaSourceInfo? selected;
+
+        if (autoSelect)
+        {
+            selected =
+                SelectFirstDirectPlayCompatible(sources, item, deviceProfile!, ctx)
+                ?? sources.FirstOrDefault();
+        }
+        else
+        {
+            mediaSourceId ??=
+                item.IsPrimaryVersion()
+                && sources.Count > 0
+                && Guid.TryParse(sources[0].Id, out var fromSource)
+                    ? fromSource
+                    : null;
+            selected = SelectByIdOrFirst(sources, mediaSourceId);
+        }
 
         _log.LogDebug(
-            "GetPlaybackMediaSources {ItemId} mediaSourceId={MediaSourceId}",
+            "GetPlaybackMediaSources {ItemId} mediaSourceId={MediaSourceId} autoSelect={AutoSelect}",
             item.Id,
-            mediaSourceId
+            mediaSourceId,
+            autoSelect
         );
 
-        var selected = SelectByIdOrFirst(sources, mediaSourceId);
         if (selected is null)
             return sources;
+
+        var selectedMediaSourceId =
+            !string.IsNullOrEmpty(selected.Id) && Guid.TryParse(selected.Id, out var selectedId)
+                ? selectedId
+                : mediaSourceId;
 
         var owner = ResolveOwnerFor(selected, item);
         if (!IsGelatoPlaybackItem(owner))
@@ -398,7 +448,7 @@ public sealed class MediaSourceManagerDecorator(
         if (owner.IsPrimaryVersion() && owner.Id != item.Id)
         {
             sources = GetStaticMediaSources(owner, enablePathSubstitution, user);
-            selected = SelectByIdOrFirst(sources, mediaSourceId);
+            selected = SelectByIdOrFirst(sources, selectedMediaSourceId);
             if (selected is null)
                 return sources;
         }
@@ -423,7 +473,7 @@ public sealed class MediaSourceManagerDecorator(
                 .ConfigureAwait(false);
 
             var refreshed = GetStaticMediaSources(item, enablePathSubstitution, user);
-            selected = SelectByIdOrFirst(refreshed, mediaSourceId);
+            selected = SelectByIdOrFirst(refreshed, selectedMediaSourceId);
 
             if (selected is null)
                 return refreshed;
@@ -447,7 +497,124 @@ public sealed class MediaSourceManagerDecorator(
 
         return [selected];
 
-        static MediaSourceInfo? SelectByIdOrFirst(IReadOnlyList<MediaSourceInfo> list, Guid? id)
+        MediaSourceInfo? SelectFirstDirectPlayCompatible(
+            IReadOnlyList<MediaSourceInfo> candidates,
+            BaseItem playbackItem,
+            DeviceProfile profile,
+            HttpContext? httpContext
+        )
+        {
+            var streamBuilder = new StreamBuilder(_mediaEncoder, _log);
+
+            foreach (var candidate in candidates)
+            {
+                if (NeedsProbe(candidate))
+                {
+                    _log.LogDebug(
+                        "Auto source: skipped {Source}; metadata incomplete",
+                        DescribeSource(candidate)
+                    );
+                    continue;
+                }
+
+                var options = new MediaOptions
+                {
+                    MediaSources = [candidate],
+                    Context = EncodingContext.Streaming,
+                    ItemId = playbackItem.Id,
+                    Profile = profile,
+                    EnableDirectStream = false,
+                };
+
+                if (
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.MaxStreamingBitrateKey,
+                        out var maxBitrateObj
+                    ) == true
+                    && maxBitrateObj is int maxBitrate
+                )
+                {
+                    options.MaxBitrate = maxBitrate;
+                }
+
+                if (
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.MaxAudioChannelsKey,
+                        out var maxAudioObj
+                    ) == true
+                    && maxAudioObj is int maxAudioChannels
+                )
+                {
+                    options.MaxAudioChannels = maxAudioChannels;
+                }
+
+                if (
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.AllowVideoStreamCopyKey,
+                        out var allowVideoObj
+                    ) == true
+                    && allowVideoObj is bool allowVideoStreamCopy
+                )
+                {
+                    options.AllowVideoStreamCopy = allowVideoStreamCopy;
+                }
+
+                if (
+                    httpContext?.Items.TryGetValue(
+                        PlaybackInfoFilter.AllowAudioStreamCopyKey,
+                        out var allowAudioObj
+                    ) == true
+                    && allowAudioObj is bool allowAudioStreamCopy
+                )
+                {
+                    options.AllowAudioStreamCopy = allowAudioStreamCopy;
+                }
+
+                var streamInfo = streamBuilder.GetOptimalVideoStream(options);
+                if (streamInfo?.PlayMethod == PlayMethod.DirectPlay)
+                {
+                    _log.LogInformation(
+                        "Auto source: selected {Source}",
+                        DescribeSource(candidate)
+                    );
+                    return candidate;
+                }
+
+                _log.LogDebug(
+                    "Auto source: rejected {Source}; play method {PlayMethod}",
+                    DescribeSource(candidate),
+                    streamInfo?.PlayMethod
+                );
+            }
+
+            _log.LogInformation(
+                "Auto source: no DirectPlay candidate; using first AIOStreams result"
+            );
+            return null;
+        }
+
+        static string DescribeSource(MediaSourceInfo source)
+        {
+            var video = source.MediaStreams?.FirstOrDefault(ms => ms.Type == MediaStreamType.Video);
+            if (video is null)
+                return source.Name ?? source.Id ?? "unknown";
+
+            var resolution =
+                video.Width.HasValue && video.Height.HasValue
+                    ? $"{video.Width}x{video.Height}"
+                    : video.Height.HasValue
+                        ? $"{video.Height}p"
+                        : "unknown resolution";
+            var codec = string.IsNullOrWhiteSpace(video.Codec)
+                ? "unknown codec"
+                : video.Codec.ToUpperInvariant();
+            return $"{resolution} {codec}";
+        }
+
+        static MediaSourceInfo? SelectByIdOrFirst(
+            IReadOnlyList<MediaSourceInfo> list,
+            Guid? id
+        )
         {
             if (!id.HasValue)
                 return list.FirstOrDefault();
@@ -583,7 +750,6 @@ public sealed class MediaSourceManagerDecorator(
             HasSegments = true,
             //HasSegments = MediaSegmentManager.HasSegments(item.Id)
         };
-
 
         if (user is not null)
         {
