@@ -182,6 +182,25 @@ public class SearchActionFilter(
             if (baseItem is null)
                 continue;
 
+            // If the same provider identity already exists in Jellyfin, return that real
+            // library item rather than a synthetic Gelato search item. This makes the native
+            // Jellyfin/Xtream item canonical while still letting Gelato supply streams later.
+            var existing = manager.FindExistingItem(baseItem);
+            if (existing is not null)
+            {
+                var existingDto = dtoService.GetBaseItemDto(existing, options);
+                if (!seen.Add(existingDto.Id))
+                    continue;
+
+                dtos.Add(existingDto);
+                log.LogDebug(
+                    "Search canonicalized {Name} to existing Jellyfin item {Id}",
+                    existing.Name,
+                    existing.Id
+                );
+                continue;
+            }
+
             var dto = dtoService.GetBaseItemDto(baseItem, options);
             var stremioUri = StremioUri.FromBaseItem(baseItem);
             dto.Id = stremioUri.ToGuid();
